@@ -1,14 +1,12 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from openpyxl import load_workbook
-from typing import List, Dict
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse, HTMLResponse
+import pandas as pd
 import io
 
 app = FastAPI()
 
-# Configure CORS
+# CORS Configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,97 +15,47 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class RoadData(BaseModel):
-    road_name: str
-    pcivalue_2019: int
-    pcivalue_2021: int
+# Root endpoint
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    return """
+    <html>
+        <head>
+            <title>PCI Analysis API</title>
+        </head>
+        <body>
+            <h1>PCI Analysis API</h1>
+            <p>Use POST /upload_excel/ to upload Excel files</p>
+        </body>
+    </html>
+    """
 
+# Excel upload endpoint
 @app.post("/upload_excel/")
 async def upload_excel(file: UploadFile = File(...)):
     try:
-        # Read file content
-        contents = await file.read()
-        
-        # Load workbook
-        wb = load_workbook(filename=io.BytesIO(contents))
-        sheet = wb.active
-        
-        # Find column indices
-        headers = [cell.value for cell in sheet[1]]
-        col_map = {}
-        
-        required_columns = {
-            "road_name": str,
-            "pcivalue_2019": int,
-            "pcivalue_2021": int
-        }
-        
-        # Case-insensitive header matching
-        for col in required_columns:
-            found = False
-            for idx, header in enumerate(headers):
-                if str(header).lower().strip() == col.lower():
-                    col_map[col] = idx
-                    found = True
-                    break
-            if not found:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Missing required column: {col}"
-                )
-        
-        # Process rows
-        results = []
-        validation_errors = []
-        
-        for row in sheet.iter_rows(min_row=2):  # Skip header
-            try:
-                data = {
-                    "road_name": str(row[col_map["road_name"]].value).strip(),
-                    "pcivalue_2019": int(row[col_map["pcivalue_2019"]].value),
-                    "pcivalue_2021": int(row[col_map["pcivalue_2021"]].value)
-                }
-                
-                # Validate PCI values
-                if not (1 <= data["pcivalue_2019"] <= 5):
-                    validation_errors.append(
-                        f"Row {row[0].row}: pcivalue_2019 must be 1-5, got {data['pcivalue_2019']}"
-                    )
-                if not (1 <= data["pcivalue_2021"] <= 5):
-                    validation_errors.append(
-                        f"Row {row[0].row}: pcivalue_2021 must be 1-5, got {data['pcivalue_2021']}"
-                    )
-                if not data["road_name"]:
-                    validation_errors.append(
-                        f"Row {row[0].row}: road_name cannot be empty"
-                    )
-                
-                results.append(data)
-            except (ValueError, TypeError):
-                validation_errors.append(
-                    f"Row {row[0].row}: Invalid data types"
-                )
-            except Exception as e:
-                validation_errors.append(
-                    f"Row {row[0].row}: Error processing row - {str(e)}"
-                )
-        
-        if validation_errors:
-            raise HTTPException(
-                status_code=400,
-                detail="Validation errors:\n" + "\n".join(validation_errors)
-            )
-        
-        return results
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error processing file: {str(e)}"
-        )
+        # Validate file type
+        if not file.filename.endswith(('.xlsx', '.xls')):
+            raise HTTPException(400, "Only Excel files are allowed")
 
+        # Read and parse file
+        contents = await file.read()
+        df = pd.read_excel(io.BytesIO(contents), engine='openpyxl')
+        
+        # Validate columns
+        required = ["road_name", "pcivalue_2019", "pcivalue_2021"]
+        missing = [col for col in required if col not in df.columns]
+        if missing:
+            raise HTTPException(400, f"Missing columns: {', '.join(missing)}")
+
+        # Convert to list of dictionaries
+        data = df[required].to_dict(orient='records')
+        return {"status": "success", "data": data}
+        
+    except Exception as e:
+        raise HTTPException(500, f"Error processing file: {str(e)}")
+
+# Health check
 @app.get("/health")
 async def health_check():
-    return {"status": "ok"}
+    return {"status": "healthy"}
